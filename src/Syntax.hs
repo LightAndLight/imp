@@ -14,6 +14,7 @@ data Statement
   | Seq Statement Statement
   | Ref Expr
   | Read Expr
+  | Assign String Statement
   | Expr Expr
   | Pass
   deriving (Eq, Show)

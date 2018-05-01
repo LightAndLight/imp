@@ -59,7 +59,18 @@ llvmTypeExpr Bool{} = i1
 llvmTypeExpr (Ann expr _) = llvmTypeExpr expr
 llvmTypeExpr Function{} = undefined
 
+llvmTypeStmt :: Statement -> LLVM.Type
+llvmTypeStmt (If _ st _) = llvmTypeStmt st
+llvmTypeStmt (While _ st) = llvmTypeStmt st
+llvmTypeStmt (Seq _ st) = llvmTypeStmt st
+llvmTypeStmt (Ref expr) = _ -- pointer thingy
+llvmTypeStmt (Read expr) = _
+llvmTypeStmt Assign{} = llvmTypeExpr Unit
+llvmTypeStmt (Expr expr) = llvmTypeExpr expr
+llvmTypeStmt Pass = llvmTypeExpr Unit
+
 cgStatement :: MonadFix m => Statement -> IRBuilderT m Operand
+cgStatement (Assign name value) = _
 cgStatement (Read expr) = do
   expr_res <- cgExpr expr
   load expr_res 0
