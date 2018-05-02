@@ -12,7 +12,7 @@ data Statement
   = If Expr Statement Statement
   | While Expr Statement
   | Seq Statement Statement
-  | Ref Expr
+  | NewRef Expr
   | Read Expr
   | Assign String Statement
   | Expr Expr

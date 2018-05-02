@@ -12,41 +12,53 @@ data TypeError
       Type {- actual   -}
   deriving (Eq, Show)
 
-infer :: MonadError TypeError m => Expr -> m Type
-infer Unit = pure TyUnit
-infer Int{} = pure TyInt
-infer Bool{} = pure TyBool
-infer (Ann expr ty) = do
-  ty' <- infer expr
+infer :: MonadError TypeError m => Expr -> m (Expr, Type)
+infer Unit = let ty = TyUnit in pure (Ann Unit ty, ty)
+infer i@Int{} = let ty = TyInt in pure (Ann i ty, ty)
+infer b@Bool{} = let ty = TyBool in pure (Ann b ty, ty)
+infer e@(Ann expr ty) = do
+  (_, ty') <- infer expr
   unless (ty == ty') . throwError $ TypeMismatch ty ty'
-  pure ty
+  pure (e, ty)
 infer (Function body) = do
-  retTy <- tcStatement body
-  pure $ TyArr TyUnit retTy
+  (body', body_ty) <- tcStatement body
+  let ty = TyArr TyUnit body_ty
+  pure (Ann (Function body') ty, ty)
 
 tcStatement
   :: MonadError TypeError m
   => Statement
-  -> m Type
+  -> m (Statement, Type)
+tcStatement (Assign name st) = do
+  (st', _) <- tcStatement st
+  pure (Assign name st', TyUnit)
 tcStatement (If cond st_if st_else) = do
-  cond_ty <- infer cond
+  (cond', cond_ty) <- infer cond
   unless (cond_ty == TyBool) . throwError $ TypeMismatch TyBool cond_ty
 
-  if_ty <- tcStatement st_if
-  else_ty <- tcStatement st_else
+  (st_if', if_ty) <- tcStatement st_if
+  (st_else', else_ty) <- tcStatement st_else
   unless (if_ty == else_ty) . throwError $ TypeMismatch if_ty else_ty
 
-  pure if_ty
+  pure (If cond' st_if' st_else', if_ty)
 tcStatement (While cond body) = do
-  cond_ty <- infer cond
+  (cond', cond_ty) <- infer cond
   unless (cond_ty == TyBool) . throwError $ TypeMismatch TyBool cond_ty
-  tcStatement body
-tcStatement (Seq st1 st2) = tcStatement st1 *> tcStatement st2
-tcStatement Pass = pure TyUnit
-tcStatement (Expr expr) = infer expr
-tcStatement (Ref expr) = TyRef <$> infer expr
+  (body', body_ty) <- tcStatement body
+  pure (While cond' body', body_ty)
+tcStatement (Seq st1 st2) = do
+  (st1', _) <- tcStatement st1
+  (st2', st2_ty) <- tcStatement st2
+  pure (Seq st1' st2', st2_ty)
+tcStatement Pass = pure (Pass, TyUnit)
+tcStatement (Expr expr) = do
+  (expr', expr_ty) <- infer expr
+  pure (Expr expr', expr_ty)
+tcStatement (NewRef expr) = do
+  (expr', expr_ty) <- infer expr
+  pure (NewRef expr', TyRef expr_ty)
 tcStatement (Read expr) = do
-  ty <- infer expr
-  case ty of
-    TyRef ty' -> pure ty'
-    _ -> throwError $ TypeMismatch (TyRef TyUnknown) ty
+  (expr', expr_ty) <- infer expr
+  case expr_ty of
+    TyRef ty -> pure (Read expr', ty)
+    _ -> throwError $ TypeMismatch (TyRef TyUnknown) expr_ty

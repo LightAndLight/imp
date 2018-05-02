@@ -1,26 +1,30 @@
+{-# language MultiParamTypeClasses, FlexibleContexts #-}
 {-# language OverloadedStrings #-}
 {-# language RecursiveDo #-}
 module Compile where
 
 import Control.Monad.Fix (MonadFix)
-import Data.Functor (($>))
+import Control.Monad.Trans (lift)
+import Control.Monad.State (MonadState(..), modify, evalState)
+import Data.Map (Map)
 import Data.String (IsString)
 import Data.Text (Text)
 import Data.Text.Lazy (toStrict)
 import LLVM.AST (Operand)
-import LLVM.AST.Type (i1, i32)
+import LLVM.AST.Type (i1, i32, ptr)
 import LLVM.Internal.Context (withContext)
 import LLVM.Internal.Target (withHostTargetMachine)
 import LLVM.IRBuilder.Constant (int32, bit)
-import LLVM.IRBuilder.Instruction (condBr, br, alloca, load)
-import LLVM.IRBuilder.Module (ModuleBuilder, buildModule, function)
+import LLVM.IRBuilder.Instruction (condBr, br, alloca, load, ret, store)
+import LLVM.IRBuilder.Module (ModuleBuilderT, buildModuleT, function)
 import LLVM.IRBuilder.Monad (IRBuilderT, block)
 import LLVM.Module (File, withModuleFromAST, writeBitcodeToFile, writeTargetAssemblyToFile)
 import LLVM.Pretty (ppllvm)
 
+import qualified Data.Map as Map
 import qualified LLVM.AST.Type as LLVM
 
-import Syntax (Expr(..), Statement(..))
+import Syntax (Expr(..), Statement(..), Type(..))
 
 moduleName :: IsString s => s
 moduleName = "module"
@@ -30,7 +34,7 @@ compileBitcode st fp =
   withContext $ \ctxt ->
   withModuleFromAST
     ctxt
-    (buildModule moduleName $ cgModule st)
+    (flip evalState Map.empty . buildModuleT moduleName $ cgModule st)
     (writeBitcodeToFile fp)
 
 compileAsm :: Statement -> File -> IO ()
@@ -39,13 +43,14 @@ compileAsm st fp =
   withContext $ \ctxt ->
   withModuleFromAST
     ctxt
-    (buildModule moduleName $ cgModule st)
+    (flip evalState Map.empty . buildModuleT moduleName $ cgModule st)
     (writeTargetAssemblyToFile targetMachine fp)
 
 renderCode :: Statement -> Text
-renderCode = toStrict . ppllvm . buildModule moduleName . cgModule
+renderCode =
+  toStrict . ppllvm . flip evalState Map.empty . buildModuleT moduleName . cgModule
 
-cgExpr :: MonadFix m => Expr -> IRBuilderT m Operand
+cgExpr :: (MonadFix m, MonadState (Map String Operand) m) => Expr -> IRBuilderT m Operand
 cgExpr Unit = bit 0
 cgExpr (Int i) = int32 i
 cgExpr (Bool b) = if b then bit 1 else bit 0
@@ -59,55 +64,87 @@ llvmTypeExpr Bool{} = i1
 llvmTypeExpr (Ann expr _) = llvmTypeExpr expr
 llvmTypeExpr Function{} = undefined
 
+llvmTypeType :: Type -> LLVM.Type
+llvmTypeType TyInt = i32
+llvmTypeType TyBool = i1
+llvmTypeType TyUnit = i1
+llvmTypeType (TyArr _ _) = undefined
+llvmTypeType (TyRef ty) = ptr (llvmTypeType ty)
+llvmTypeType TyUnknown = undefined
+
 llvmTypeStmt :: Statement -> LLVM.Type
 llvmTypeStmt (If _ st _) = llvmTypeStmt st
 llvmTypeStmt (While _ st) = llvmTypeStmt st
 llvmTypeStmt (Seq _ st) = llvmTypeStmt st
-llvmTypeStmt (Ref expr) = _ -- pointer thingy
-llvmTypeStmt (Read expr) = _
+
+llvmTypeStmt (NewRef (Ann _ ty)) = ptr (llvmTypeType ty)
+llvmTypeStmt (NewRef _) = error "NewRef's target is missing a type annotation"
+
+llvmTypeStmt (Read (Ann _ (TyRef ty))) = llvmTypeType ty
+llvmTypeStmt (Read (Ann _ _)) = error "Read's target is not a reference"
+llvmTypeStmt (Read _) = error "Read's target is missing a type annotation"
+
 llvmTypeStmt Assign{} = llvmTypeExpr Unit
-llvmTypeStmt (Expr expr) = llvmTypeExpr expr
+
+llvmTypeStmt (Expr (Ann _ ty)) = llvmTypeType ty
+llvmTypeStmt (Expr _) = error "Expr's target is missing a type annotation"
+
 llvmTypeStmt Pass = llvmTypeExpr Unit
 
-cgStatement :: MonadFix m => Statement -> IRBuilderT m Operand
-cgStatement (Assign name value) = _
+cgStatement
+  :: (MonadFix m, MonadState (Map String Operand) m)
+  => Statement
+  -> IRBuilderT m Operand
+cgStatement (Assign name st) = do
+  st_res <- cgStatement st
+  reference <- alloca (llvmTypeStmt st) (Just st_res) 0
+  lift $ modify (Map.insert name reference)
+  pure reference
 cgStatement (Read expr) = do
   expr_res <- cgExpr expr
   load expr_res 0
-cgStatement (Ref expr) = do
+cgStatement (NewRef expr) = do
   expr_res <- cgExpr expr
   alloca (llvmTypeExpr expr) (Just expr_res) 1
 cgStatement (If cond st_if st_else) = mdo
+  res <- alloca (llvmTypeStmt st_if) Nothing 0
   cond_res <- cgExpr cond
   condBr cond_res when_true when_false
 
   when_true <- block
-  _ <- cgStatement st_if
+  st_if_res <- cgStatement st_if
+  store st_if_res 0 res
   br after
 
   when_false <- block
-  _ <- cgStatement st_else
+  st_else_res <- cgStatement st_else
+  store st_else_res 0 res
   br after
 
   after <- block
-  cgExpr Unit
+  pure res
 cgStatement (While cond body) = mdo
   start <- block
   cond_res <- cgExpr cond
   condBr cond_res continue end
 
   continue <- block
-  _ <- cgStatement body
+  body_value <- cgStatement body
   br start
 
   end <- block
-  cgExpr Unit
+  pure body_value
 cgStatement (Seq st1 st2) =
   cgStatement st1 *>
-  cgStatement st2 *>
-  cgExpr Unit
+  cgStatement st2
 cgStatement Pass = cgExpr Unit
-cgStatement (Expr expr) = cgExpr expr *> cgExpr Unit
+cgStatement (Expr expr) = cgExpr expr
 
-cgModule :: Statement -> ModuleBuilder Operand
-cgModule st = function "main" [] i32 (\_ -> cgStatement st $> ())
+cgModule
+  :: (MonadFix m, MonadState (Map String Operand) m)
+  => Statement
+  -> ModuleBuilderT m Operand
+cgModule st =
+  function "main" [] i32 $ \_ -> do
+    st_val <- cgStatement st
+    ret st_val
