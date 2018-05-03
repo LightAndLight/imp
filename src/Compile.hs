@@ -7,6 +7,8 @@ import Control.Monad.Fix (MonadFix)
 import Control.Monad.Trans (lift)
 import Control.Monad.State (MonadState(..), modify, evalState)
 import Data.Map (Map)
+import Data.Maybe (fromMaybe)
+import Data.Semigroup ((<>))
 import Data.String (IsString)
 import Data.Text (Text)
 import Data.Text.Lazy (toStrict)
@@ -51,6 +53,14 @@ renderCode =
   toStrict . ppllvm . flip evalState Map.empty . buildModuleT moduleName . cgModule
 
 cgExpr :: (MonadFix m, MonadState (Map String Operand) m) => Expr -> IRBuilderT m Operand
+cgExpr (Var name) = do
+  env <- lift get
+  let
+    reference =
+      fromMaybe
+      (error $ name <> " not found in environment")
+      (Map.lookup name env)
+  load reference 0
 cgExpr Unit = bit 0
 cgExpr (Int i) = int32 i
 cgExpr (Bool b) = if b then bit 1 else bit 0
@@ -58,11 +68,8 @@ cgExpr (Ann e _) = cgExpr e
 cgExpr (Function body) = cgStatement body
 
 llvmTypeExpr :: Expr -> LLVM.Type
-llvmTypeExpr Int{} = i32
-llvmTypeExpr Unit = i1
-llvmTypeExpr Bool{} = i1
-llvmTypeExpr (Ann expr _) = llvmTypeExpr expr
-llvmTypeExpr Function{} = undefined
+llvmTypeExpr (Ann _ ty) = llvmTypeType ty
+llvmTypeExpr _ = error "expression is missing a type annotation"
 
 llvmTypeType :: Type -> LLVM.Type
 llvmTypeType TyInt = i32
@@ -91,13 +98,33 @@ llvmTypeStmt (Expr _) = error "Expr's target is missing a type annotation"
 
 llvmTypeStmt Pass = llvmTypeExpr Unit
 
+stmtType :: Statement -> Type
+stmtType (If _ st _) = stmtType st
+stmtType (While _ st) = stmtType st
+stmtType (Seq _ st) = stmtType st
+
+stmtType (NewRef (Ann _ ty)) = TyRef ty
+stmtType (NewRef _) = error "NewRef's target is missing a type annotation"
+
+stmtType (Read (Ann _ (TyRef ty))) = ty
+stmtType (Read (Ann _ _)) = error "Read's target is not a reference"
+stmtType (Read _) = error "Read's target is missing a type annotation"
+
+stmtType Assign{} = TyUnit
+
+stmtType (Expr (Ann _ ty)) = ty
+stmtType (Expr _) = error "Expr's target is missing a type annotation"
+
+stmtType Pass = TyUnit
+
 cgStatement
   :: (MonadFix m, MonadState (Map String Operand) m)
   => Statement
   -> IRBuilderT m Operand
 cgStatement (Assign name st) = do
   st_res <- cgStatement st
-  reference <- alloca (llvmTypeStmt st) (Just st_res) 0
+  reference <- alloca (llvmTypeStmt st) Nothing 0
+  store reference 0 st_res
   lift $ modify (Map.insert name reference)
   pure reference
 cgStatement (Read expr) = do
@@ -105,7 +132,9 @@ cgStatement (Read expr) = do
   load expr_res 0
 cgStatement (NewRef expr) = do
   expr_res <- cgExpr expr
-  alloca (llvmTypeExpr expr) (Just expr_res) 1
+  reference <- alloca (llvmTypeExpr expr) Nothing 0
+  store reference 0 expr_res
+  pure reference
 cgStatement (If cond st_if st_else) = mdo
   res <- alloca (llvmTypeStmt st_if) Nothing 0
   cond_res <- cgExpr cond
@@ -113,12 +142,12 @@ cgStatement (If cond st_if st_else) = mdo
 
   when_true <- block
   st_if_res <- cgStatement st_if
-  store st_if_res 0 res
+  store res 0 st_if_res
   br after
 
   when_false <- block
   st_else_res <- cgStatement st_else
-  store st_else_res 0 res
+  store res 0 st_else_res
   br after
 
   after <- block
@@ -144,7 +173,4 @@ cgModule
   :: (MonadFix m, MonadState (Map String Operand) m)
   => Statement
   -> ModuleBuilderT m Operand
-cgModule st =
-  function "main" [] i32 $ \_ -> do
-    st_val <- cgStatement st
-    ret st_val
+cgModule st = function "main" [] i32 $ \_ -> cgStatement st >>= ret

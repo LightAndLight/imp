@@ -6,6 +6,7 @@ data Expr
   | Bool Bool
   | Ann Expr Type
   | Function Statement
+  | Var String
   deriving (Eq, Show)
 
 data Statement

@@ -3,6 +3,10 @@ module Typecheck where
 
 import Control.Monad (unless)
 import Control.Monad.Except (MonadError(..))
+import Control.Monad.State (MonadState(..), modify)
+import Data.Map (Map)
+
+import qualified Data.Map as Map
 
 import Syntax (Expr(..), Statement(..), Type(..))
 
@@ -10,9 +14,20 @@ data TypeError
   = TypeMismatch
       Type {- expected -}
       Type {- actual   -}
+  | NotFound String
   deriving (Eq, Show)
 
-infer :: MonadError TypeError m => Expr -> m (Expr, Type)
+infer
+  :: ( MonadState (Map String Type) m
+     , MonadError TypeError m
+     )
+  => Expr -> m (Expr, Type)
+infer v@(Var name) = do
+  ctxt <- get
+  maybe
+    (throwError $ NotFound name)
+    (\ty -> pure (Ann v ty, ty))
+    (Map.lookup name ctxt)
 infer Unit = let ty = TyUnit in pure (Ann Unit ty, ty)
 infer i@Int{} = let ty = TyInt in pure (Ann i ty, ty)
 infer b@Bool{} = let ty = TyBool in pure (Ann b ty, ty)
@@ -26,11 +41,14 @@ infer (Function body) = do
   pure (Ann (Function body') ty, ty)
 
 tcStatement
-  :: MonadError TypeError m
+  :: ( MonadError TypeError m
+     , MonadState (Map String Type) m
+     )
   => Statement
   -> m (Statement, Type)
 tcStatement (Assign name st) = do
-  (st', _) <- tcStatement st
+  (st', st_ty) <- tcStatement st
+  modify $ Map.insert name st_ty
   pure (Assign name st', TyUnit)
 tcStatement (If cond st_if st_else) = do
   (cond', cond_ty) <- infer cond
