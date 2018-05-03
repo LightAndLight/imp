@@ -138,7 +138,7 @@ cgStatement
   :: (MonadFix m, MonadState (Map String Operand) m)
   => Statement
   -> IRBuilderT m Operand
-cgStatement (Assign name st) = do
+cgStatement (Assign name _ st) = do
   st_res <- cgStatement st
   reference <- alloca (llvmTypeStmt st) Nothing 0
   store reference 0 st_res

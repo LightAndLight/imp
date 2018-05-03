@@ -62,10 +62,15 @@ tcStatement
      )
   => Statement
   -> m (Statement, Type)
-tcStatement (Assign name st) = do
+tcStatement (Assign name maybe_ty st) = do
   (st', st_ty) <- tcStatement st
+  case maybe_ty of
+    Nothing -> pure ()
+    Just ty ->
+      unless (ty == st_ty) . throwError $
+      TypeMismatch ty st_ty
   modify $ Map.insert name st_ty
-  pure (Assign name st', TyUnit)
+  pure (Assign name maybe_ty st', TyUnit)
 tcStatement (If cond st_if st_else) = do
   (cond', cond_ty) <- tcStatement cond
   unless (cond_ty == TyBool) . throwError $ TypeMismatch TyBool cond_ty

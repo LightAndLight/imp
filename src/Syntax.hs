@@ -19,7 +19,7 @@ data Statement
   | NewRef Expr
   | Read Expr
   | Write Expr Expr
-  | Assign String Statement
+  | Assign String (Maybe Type) Statement
   | Expr Expr
   | Pass
   deriving (Eq, Show)
