@@ -1,0 +1,6 @@
+a <- { newref 0 } ;
+while { a' <- { read a } ; not (intEq a' 10) } {
+  a' <- { read a } ;
+  write a (add a' 1) ;
+  a'
+}

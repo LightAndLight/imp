@@ -17,7 +17,7 @@ import LLVM.AST.Type (i1, i32, ptr)
 import LLVM.Internal.Context (withContext)
 import LLVM.Internal.Target (withHostTargetMachine)
 import LLVM.IRBuilder.Constant (int32, bit)
-import LLVM.IRBuilder.Instruction (condBr, br, alloca, load, ret, store)
+import LLVM.IRBuilder.Instruction (condBr, br, alloca, load, ret, store, add, icmp)
 import LLVM.IRBuilder.Module (ModuleBuilderT, buildModuleT, function)
 import LLVM.IRBuilder.Monad (IRBuilderT, block)
 import LLVM.Module (File, withModuleFromAST, writeBitcodeToFile, writeTargetAssemblyToFile)
@@ -25,6 +25,7 @@ import LLVM.Pretty (ppllvm)
 
 import qualified Data.Map as Map
 import qualified LLVM.AST.Type as LLVM
+import qualified LLVM.AST.IntegerPredicate as LLVM
 
 import Syntax (Expr(..), Statement(..), Type(..))
 
@@ -53,6 +54,18 @@ renderCode =
   toStrict . ppllvm . flip evalState Map.empty . buildModuleT moduleName . cgModule
 
 cgExpr :: (MonadFix m, MonadState (Map String Operand) m) => Expr -> IRBuilderT m Operand
+cgExpr (Not expr) = do
+  expr_res <- cgExpr expr
+  c <- bit 0
+  icmp LLVM.EQ expr_res c
+cgExpr (IntEq expr1 expr2) = do
+  expr1_res <- cgExpr expr1
+  expr2_res <- cgExpr expr2
+  icmp LLVM.EQ expr1_res expr2_res
+cgExpr (Add expr1 expr2) = do
+  expr1_res <- cgExpr expr1
+  expr2_res <- cgExpr expr2
+  add expr1_res expr2_res
 cgExpr (Var name) = do
   env <- lift get
   let
@@ -91,6 +104,8 @@ llvmTypeStmt (Read (Ann _ (TyRef ty))) = llvmTypeType ty
 llvmTypeStmt (Read (Ann _ _)) = error "Read's target is not a reference"
 llvmTypeStmt (Read _) = error "Read's target is missing a type annotation"
 
+llvmTypeStmt Write{} = llvmTypeExpr Unit
+
 llvmTypeStmt Assign{} = llvmTypeExpr Unit
 
 llvmTypeStmt (Expr (Ann _ ty)) = llvmTypeType ty
@@ -110,6 +125,8 @@ stmtType (Read (Ann _ (TyRef ty))) = ty
 stmtType (Read (Ann _ _)) = error "Read's target is not a reference"
 stmtType (Read _) = error "Read's target is missing a type annotation"
 
+stmtType Write{} = TyUnit
+
 stmtType Assign{} = TyUnit
 
 stmtType (Expr (Ann _ ty)) = ty
@@ -126,7 +143,12 @@ cgStatement (Assign name st) = do
   reference <- alloca (llvmTypeStmt st) Nothing 0
   store reference 0 st_res
   lift $ modify (Map.insert name reference)
-  pure reference
+  cgExpr Unit
+cgStatement (Write reference value) = do
+  ref_res <- cgExpr reference
+  val_res <- cgExpr value
+  store ref_res 0 val_res
+  cgExpr Unit
 cgStatement (Read expr) = do
   expr_res <- cgExpr expr
   load expr_res 0
@@ -137,7 +159,7 @@ cgStatement (NewRef expr) = do
   pure reference
 cgStatement (If cond st_if st_else) = mdo
   res <- alloca (llvmTypeStmt st_if) Nothing 0
-  cond_res <- cgExpr cond
+  cond_res <- cgStatement cond
   condBr cond_res when_true when_false
 
   when_true <- block
@@ -151,10 +173,11 @@ cgStatement (If cond st_if st_else) = mdo
   br after
 
   after <- block
-  pure res
+  load res 0
 cgStatement (While cond body) = mdo
+  br start
   start <- block
-  cond_res <- cgExpr cond
+  cond_res <- cgStatement cond
   condBr cond_res continue end
 
   continue <- block
@@ -173,4 +196,8 @@ cgModule
   :: (MonadFix m, MonadState (Map String Operand) m)
   => Statement
   -> ModuleBuilderT m Operand
-cgModule st = function "main" [] i32 $ \_ -> cgStatement st >>= ret
+cgModule st =
+  function "main" [] i32 $
+  \_ -> do
+    _ <- block
+    cgStatement st >>= ret

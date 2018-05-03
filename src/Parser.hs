@@ -1,25 +1,55 @@
 {-# language RecursiveDo #-}
 module Parser where
 
-import Control.Applicative ((<|>), some, many)
+import Control.Applicative ((<|>), some, many, optional)
 import Data.Functor (($>), (<$))
-import Text.Trifecta (CharParsing, char, digit, oneOf, string)
+import Text.Trifecta (CharParsing, char, digit, letter, oneOf, string, try)
 
 import Syntax (Expr(..), Statement(..), Type(..))
 
 {-|
 
 digit ::= ['0'..'9']
-expr ::= digit+ | 'True' | 'False'
-statement ::= single_statement | single_statement ';' statement
-single_statement ::= if_statement | while_statement | 'pass'
-if_statement ::= 'if' expr block 'else' block
-block ::= '{' statement '}'
+identifier ::= [a-zA-Z_-']
 
+expr ::= expr [':' type]
+
+simple_expr ::=
+  '(' expr ')' |
+  digit+ |
+  'True' |
+  'False' |
+  'not' expr |
+  'add' expr expr |
+  'intEq' expr expr |
+  identifier
+
+statement ::= single_statement | single_statement ';' statement
+
+single_statement ::=
+  if_statement |
+  while_statement |
+  assign_statement |
+  'newref' expr |
+  'read' expr |
+  expr ':=' expr |
+  'pass' |
+  expr
+
+if_statement ::= 'if' block 'then' block 'else' block
+while_statement ::= 'while' block block
+assign_statement ::= identifier '<-' block
+
+block ::= '{' statement '}'
 -}
 
 token :: CharParsing m => m a -> m a
 token m = m <* many (oneOf "\n\r\t ")
+
+identifier :: CharParsing m => m String
+identifier =
+  token $
+  some (letter <|> oneOf "_-\'")
 
 type_ :: CharParsing m => m Type
 type_ =
@@ -27,33 +57,54 @@ type_ =
   string "Bool" $> TyBool <|>
   string "Int" $> TyInt
 
+simple_expr :: CharParsing m => m Expr
+simple_expr =
+  token (char '(') *> expr <* token (char ')') <|>
+  Not <$ token (string "not") <*> expr <|>
+  Add <$ token (string "add") <*> expr <*> expr <|>
+  IntEq <$ token (string "intEq") <*> expr <*> expr <|>
+  Int . read <$> token (some digit) <|>
+  token (string "True") $> Bool True <|>
+  token (string "False") $> Bool False <|>
+  Var <$> identifier
+
 expr :: CharParsing m => m Expr
 expr =
-  token $
-  Int . read <$> some digit <|>
-  string "True" $> Bool True <|>
-  string "False" $> Bool False <|>
-  Ann <$> expr <* token (char ':') <*> type_
+  (\a -> maybe a (Ann a)) <$>
+  simple_expr <*>
+  optional (token (char ':') *> type_)
 
 single_statement :: CharParsing m => m Statement
 single_statement =
   if_statement <|>
   while_statement <|>
-  token (string "pass") $> Pass
+  assign_statement <|>
+  NewRef <$ token (string "newref") <*> expr <|>
+  Read <$ token (string "read") <*> expr <|>
+  token (string "pass") $> Pass <|>
+  Write <$ token (string "write") <*> expr <*> expr <|>
+  Expr <$> expr
 
 while_statement :: CharParsing m => m Statement
 while_statement =
   token $
-  While <$ token (string "while") <*> expr <*> block
+  While <$ token (string "while") <*> block <*> block
 
 if_statement :: CharParsing m => m Statement
 if_statement =
-  If <$ token (string "if") <*> expr <*> block <* token (string "else") <*> block
+  If <$ token (string "if") <*> block <*
+  token (string "then") <*> block <*
+  token (string "else") <*> block
+
+assign_statement :: CharParsing m => m Statement
+assign_statement =
+  Assign <$> try (identifier <* token (string "<-")) <*> block
 
 block :: CharParsing m => m Statement
 block = token (char '{') *> statement <* token (char '}')
 
 statement :: CharParsing m => m Statement
 statement =
-  single_statement <|>
-  Seq <$> single_statement <* token (char ';') <*> statement
+  (\a -> maybe a (Seq a)) <$>
+  single_statement <*>
+  optional (token (char ';') *> statement)
