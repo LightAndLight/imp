@@ -36,9 +36,11 @@ single_statement ::=
   'pass' |
   expr
 
+block_or_single_statement ::= block | single_statement
+
 if_statement ::= 'if' block 'then' block 'else' block
 while_statement ::= 'while' block block
-assign_statement ::= identifier '<-' block
+assign_statement ::= identifier '<-' block_or_single_statement
 
 block ::= '{' statement '}'
 -}
@@ -98,10 +100,13 @@ if_statement =
 
 assign_statement :: CharParsing m => m Statement
 assign_statement =
-  Assign <$> try (identifier <* token (string "<-")) <*> block
+  Assign <$> try (identifier <* token (string "<-")) <*> block_or_single_statement
 
 block :: CharParsing m => m Statement
 block = token (char '{') *> statement <* token (char '}')
+
+block_or_single_statement :: CharParsing m => m Statement
+block_or_single_statement = block <|> single_statement
 
 statement :: CharParsing m => m Statement
 statement =
